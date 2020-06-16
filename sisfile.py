@@ -92,6 +92,7 @@ class SISField(Structure):
     Length : StructurePayloadLength
 
 class SISString(SISField):
+    # UCS-2 encoded unicode string
     String : UTF16String # made-up name
 
 class SISArray(SISField):
@@ -115,16 +116,20 @@ class SISCompressedDeflate(SISCompressed):
     CompressedData : Zlib['_tp']
 
 class SISVersion(SISField):
+    Length = 12
     # -1 means Any
     Major : TInt32
     Minor : TInt32
     Build : TInt32
 
 class SISVersionRange(SISField):
+    # Length = 40  # can be 20 as well
     FromVersion : SISVersion
     ToVersion : SISVersion
+    #ToVersion : Optional
 
 class SISDate(SISField):
+    Length = 4
     Year : TUint16
     Month : TUint8 # zero-based
     Day : TUint8 # one-based
@@ -142,22 +147,27 @@ class SISDateTime(SISField):
 
 class SISUid(SISField):
     # is to match UID3 from file header
+    Length = 4
     UID1 : TInt32
 
 class SISLanguage(SISField):
+    Length = 4
     Language : BuildEnum(TUint32, TLanguage)
 
 class SISBlob(SISField):
     Blob : UnknownPayload
 
 class SISDataIndex(SISField):
+    Length = 4
     DataIndex : TUint32
 
 # reordered before SISContents:
 class SISControllerChecksum(SISField):
+    Length = 2
     Checksum : TUint16 # CRC-16
 
 class SISDataChecksum(SISField):
+    Length = 2
     Checksum : TUint16 # CRC-16
 
 # reordered before SISController:
@@ -193,6 +203,7 @@ class SISPrerequisites(SISField):
 
 # reordered before SISProperties
 class SISProperty(SISField):
+    Length = 8
     Key : TInt32
     Value : TInt32
 
@@ -219,17 +230,33 @@ class SISFileDescription(SISField):
     UncompressedLength : TUint64
     FileIndex : TUint32
 
+# reordered before SISController
 class SISLogo(SISField):
     LogoFile : SISFileDescription
 
-# reordered before SISController
 class SISInstallBlock(SISField):
-    #Files : SISArray[SISFileDescription]
-    pass
+    Files : SISArray[SISFileDescription]
+    EmbeddedSISFiles : SISArray[SISField] # should be SISControllers
+    IfBlocks : SISArray[SISField] # should be SISIf
+
+# reordered before SISSignatureCertificateChain
+class SISCertificateChain(SISField):
+    CertificateData : SISBlob
+
+# reordered before SISSignature
+class SISSignatureAlgorithm(SISField):
+    # Supported values:
+    # * “1.2.840.113549.1.1.5” - SHA-1 with RSA signature
+    # * “1.2.840.10040.4.3”    - SHA-1 with DSA signature
+    AlgorithmIdentifier : SISString
+
+class SISSignature(SISField):
+    SignatureAlgorithm : SISSignatureAlgorithm
+    SignatureData : SISBlob
 
 class SISSignatureCertificateChain(SISField):
-    # XXX
-    pass
+    Signatures : SISArray[SISSignature]
+    CertificateChain : SISCertificateChain
 
 class SISController(SISField):
     Info : SISInfo
@@ -242,12 +269,36 @@ class SISController(SISField):
     Signature0 : SISSignatureCertificateChain
     DataIndex : SISDataIndex
 
+# reordered before SISDataUnit
+class SISFileData(SISField):
+    FileData : SISCompressed[UnknownPayload]
+
+# reordered before SISData
+class SISDataUnit(SISField):
+    FileData : SISArray[SISFileData]
+
 class SISData(SISField):
-# EEEE
-    pass
+    DataUnits : SISArray[SISDataUnit]
 
 class SISContents(SISField):
     ControllerChecksum : SISControllerChecksum
     DataChecksum : SISDataChecksum
     Controller : SISCompressed[SISController]
     Data : SISData
+
+# reordered before SISIf
+class SISExpression(SISField):
+    Operator : TUint32 # TOperator
+    IntegerValue : TInt32
+    StringValue : SISString
+    LeftExpression : SISField # should be SISExpression
+    RightExpression : SISField # should be SISExpression
+
+class SISElseIf(SISField):
+    Expression : SISExpression
+    InstallBlock : SISInstallBlock
+
+class SISIf(SISField):
+    Expression : SISExpression
+    InstallBlock : SISInstallBlock
+    ElseIfs : SISArray[SISElseIf]

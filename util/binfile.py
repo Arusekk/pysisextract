@@ -349,15 +349,18 @@ class ZlibReader:
         if n < 0:
             raise ValueError("No reading everything!!!")
         ret = self._readbuf.read(n)
+        rd = None
         while len(ret) < n:
             rd = self._fp.read(1)
             if not rd:
                 ret += self._obj.flush()
                 break
             ret += self._obj.decompress(rd)
-        self._readbuf = BytesIO(ret[n:])
-        ret = ret[:n]
+        if rd is not None:
+            self._readbuf = BytesIO(ret[n:])
+            ret = ret[:n]
         self._off += len(ret)
+        print(f'read({n}): {ret!r}')
         return ret
 
 class Zlib(Structure):
@@ -373,7 +376,6 @@ class Array(list, Structure):
     _template = '_tp',
     @classmethod
     def __new__(cls, subcl, parseobj, _init_common=None):
-        print(parseobj)
         if cls._template:
             raise TemplateNeeded(subcl.__name__)
         self = super().__new__(subcl)
@@ -382,6 +384,9 @@ class Array(list, Structure):
             self._init_common = _init_common
         return self._parse(parsefile)
 
+    def __init__(self, *args, **kw):
+        return
+
     def _parse(self, fileobj):
         while fileobj.tell() < self._maxfin:
             if self._init_common:
@@ -389,6 +394,7 @@ class Array(list, Structure):
             else:
                 obj = self._tp(fileobj)
             self.append(obj)
+        return self
 
 class UTF16String(Structure): # str
     def _parse(self, fileobj):
