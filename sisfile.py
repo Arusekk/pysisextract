@@ -12,6 +12,9 @@ from util.binfile import (
     UInt32,
     UInt16,
     UInt8,
+    UTF16String,
+    Array,
+    UnknownPayload,
 )
 
 # based on format documentation from:
@@ -79,7 +82,7 @@ class TCompressionAlgorithm(IntEnum):
     SISCompressedNone, SISCompressedDeflate = range(2)
 
 class TLanguage(IntEnum):
-    C = 0
+    C, EN = range(2) # made-up names
 
 class SISField(Structure):
     _subclassfield = 'Type'
@@ -88,11 +91,16 @@ class SISField(Structure):
     Length : EfficientUInt63
     Length : StructurePayloadLength
 
-#class SISString(SISField):
-    pass
+class SISString(SISField):
+    String : UTF16String # made-up name
 
-#class SISArray(SISField):
-    pass
+class SISArray(SISField):
+    _template = '_tp',
+    SISFieldType : BuildEnum(TUint32, TField)
+    Contents : Array['_tp'] # made-up name
+
+    def init_common(self, obj):
+        obj.Type = self.SISFieldType
 
 class SISCompressed(SISField):
     _subclassfield = 'Algorithm'
@@ -139,8 +147,8 @@ class SISUid(SISField):
 class SISLanguage(SISField):
     Language : BuildEnum(TUint32, TLanguage)
 
-#class SISBlob(SISField):
-    pass
+class SISBlob(SISField):
+    Blob : UnknownPayload
 
 class SISDataIndex(SISField):
     DataIndex : TUint32
@@ -152,17 +160,87 @@ class SISControllerChecksum(SISField):
 class SISDataChecksum(SISField):
     Checksum : TUint16 # CRC-16
 
-class SISController(SISField):
-#    Info : SISInfo
-#    Options : SISSupportedOptions
-#    Languages : SISSupportedLanguages
-#    Prerequisites : SISPrerequisites
-#    Properties : SISProperties
-#    Logo : SISLogo
-#    InstallBlock : SISInstallBlock
-#    Signature0 : SISSignatureCertificateChain
-#    DataIndex : SISDataIndex
+# reordered before SISController:
+class SISInfo(SISField):
+    UID : SISUid
+    VendorUniqueName : SISString
+    Names : SISArray[SISString]
+    VendorNames : SISArray[SISString]
+    Version : SISVersion
+    CreationTime : SISDateTime
+    InstallType : TUint8 # TInstallType
+    InstallFlags : TUint8 # TInstallFlags
+
+class SISSupportedLanguages(SISField):
+    Languages : SISArray[SISLanguage]
+
+# reordered before SISSupportedOptions:
+class SISSupportedOption(SISField):
+    Names : SISArray[SISString]
+
+class SISSupportedOptions(SISField):
+    Options : SISArray[SISSupportedOption]
+
+# reordered before SISPrerequisites
+class SISDependency(SISField):
+    UID : SISUid
+    VersionRange : SISVersionRange
+    DependencyNames : SISArray[SISString]
+
+class SISPrerequisites(SISField):
+    TargetDevices : SISArray[SISDependency]
+    Dependencies : SISArray[SISDependency]
+
+# reordered before SISProperties
+class SISProperty(SISField):
+    Key : TInt32
+    Value : TInt32
+
+class SISProperties(SISField):
+    Properties : SISArray[SISProperty]
+
+# reordered before SISFileDescription
+class SISCapabilities(SISField):
+    Capabilities : Array[TUint32] # bitfield
+
+class SISHash(SISField):
+    HashAlgorithm : TUint32 # TSISHashAlgorithm
+    HashData : SISBlob
+
+# reordered before SISLogo
+class SISFileDescription(SISField):
+    Target : SISString
+    MIMEType : SISString
+    Capabilities : SISCapabilities
+    Hash : SISHash
+    Operation : TUint32
+    OperationOptions : TUint32
+    Length : TUint64
+    UncompressedLength : TUint64
+    FileIndex : TUint32
+
+class SISLogo(SISField):
+    LogoFile : SISFileDescription
+
+# reordered before SISController
+class SISInstallBlock(SISField):
+    #Files : SISArray[SISFileDescription]
     pass
+
+class SISSignatureCertificateChain(SISField):
+    # XXX
+    pass
+
+class SISController(SISField):
+    Info : SISInfo
+    Options : SISSupportedOptions
+    Languages : SISSupportedLanguages
+    Prerequisites : SISPrerequisites
+    Properties : SISProperties
+    Logo : SISLogo
+    InstallBlock : SISInstallBlock
+    Signature0 : SISSignatureCertificateChain
+    DataIndex : SISDataIndex
 
 class SISData(SISField):
 # EEEE

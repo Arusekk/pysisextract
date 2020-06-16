@@ -7,8 +7,35 @@ from struct import Struct
 def TellFile(fp):
     return fp
 
+class Unknown(float):
+    def __repr__(self):
+        return "UNKNOWN"
+    def __add__(self, o):
+        return self
+    __radd__ = __add__
+
+UNKNOWN = Unknown('inf')
+
 class StructurePayloadLength:
-    pass
+    @staticmethod
+    def mkvalidator(key):
+        def ret(self):
+            value = getattr(self, key)
+            actual = self._fin - self._actual_roffsets[key]
+            padsize = -actual % self.ALIGNMENT
+            if value < actual or value > actual + padsize:
+                raise ParseError(f"{type(self).__name__} at offset {self._at}: "
+                                 f"payload was to be {value} bytes long, "
+                                 f" but {actual} bytes were parsed.")
+        return ret
+
+    @staticmethod
+    def parsedhook(key):
+        def ret(self):
+            value = getattr(self, key)
+            self._maxfin = self._actual_roffsets[key] + value
+            #print(f"Fixed maxfin to {self._maxfin=}")
+        return ret
 
 class StructureSubClass:
     pass
@@ -19,11 +46,20 @@ class StructureAnnotations(dict):
         super().__init__()
     def __setitem__(self, key, val):
         if key in self:
-            self.pardict['_offsets'] = {}
+            self.pardict['_validators'].append(val.mkvalidator(key))
+            self.pardict['_hooks'][key] = val.parsedhook(key)
             return
+        self.pardict['_offsets'][key] = self.pardict['SIZE']
+        if isinstance(val, Structure):
+            self.pardict['SIZE'] += val.SIZE
+        else:
+            self.pardict['SIZE'] = UNKNOWN
         return super().__setitem__(key, val)
 
 class ParseError(ValueError):
+    pass
+
+class TemplateNeeded(ValueError):
     pass
 
 class StructureMeta(type):
@@ -34,7 +70,19 @@ class StructureMeta(type):
             '__annotations__': StructureAnnotations(d),
             '_subclassfield': None,
             '_offsets': {},
+            '_validators': [],
+            '_hooks': {},
+            'SIZE': 0,
         })
+        for base in bases:
+            if hasattr(base, 'SIZE'):
+                d['SIZE'] = base.SIZE
+            if hasattr(base, '_validators'):
+                d['_validators'].extend(base._validators)
+            if hasattr(base, '_offsets'):
+                d['_offsets'].update(base._offsets)
+            if hasattr(base, '_hooks'):
+                d['_hooks'].update(base._hooks)
         return d
 
     @classmethod
@@ -48,6 +96,8 @@ class StructureMeta(type):
             annotations_all.update(getattr(base, '__annotations_all__', ()))
         annotations_all.update(dic.get('__annotations__', ()))
         dic['__annotations_all__'] = annotations_all
+        if hasattr(dic.get('_struct'), 'size'):
+            dic['SIZE'] = dic['_struct'].size
         cls = type.__new__(metacl, name, bases, dic)
         subclassfield = getattr(cls.__base__, '_subclassfield', None)
         if subclassfield:
@@ -67,7 +117,7 @@ class StructureMeta(type):
         elif isinstance(bases, type):
             bases = bases,
         dic = meta.__prepare__(name, bases)
-        dic['_struct'] = struc
+        dic['_struct'] = dic['_rdstruct'] = struc
         return meta(name, bases, dic)
 
     def _instantiate(cls, args):
@@ -84,11 +134,11 @@ class StructureMeta(type):
                 idx = template.index(pattern)
             except ValueError:
                 continue
-            if isinstance(value, type):
+            if isinstance(value, str):
+                template[template.index(pattern)] = value
+            else:
                 del template[idx]
                 setattr(cls, pattern, value)
-            else:
-                template[template.index(pattern)] = value
         cls._template = tuple(filter(bool, template))
         return cls
 
@@ -111,54 +161,97 @@ class Structure(metaclass=StructureMeta):
 
     @classmethod
     def _readstruct(cls, parsefile):
-        return cls._struct.unpack(parsefile.read(cls._struct.size))
+        return cls._rdstruct.unpack(parsefile.read(cls.SIZE))
 
     @staticmethod
     def _parsefile(parseobj):
+        if isinstance(parseobj, tuple):
+            parseobj, maxfin = parseobj
+        else:
+            maxfin = None
         if hasattr(parseobj, 'read'):
-            return TellFile(parseobj)
-        return BytesIO(parseobj)
+            return TellFile(parseobj), maxfin
+        return BytesIO(parseobj), maxfin
+
+    def _validate(self):
+        for validator in self._validators:
+            validator(self)
 
     @classmethod
-    def __new__(cls, subcl, parseobj=None, parsefile=None):
+    def __new__(cls, subcl, parseobj=None, parsefile=None, init_common=None):
         if cls._template:
-            raise TemplateNeeded()
+            raise TemplateNeeded(cls.__name__)
         if isinstance(parseobj, Structure):
             self = super().__new__(subcl)
             self.__dict__.update(parseobj.__dict__)
+            maxfin = self._maxfin
         else:
-            parsefile = cls._parsefile(parseobj)
+            parsefile, maxfin = cls._parsefile(parseobj)
             self = super().__new__(subcl)
+            self._actual_offsets = {}
+            self._actual_roffsets = {}
         if parseobj is None:
             return self
-        offset = parsefile.tell()
-        if offset % cls.ALIGNMENT:
+        if init_common:
+            #print(f"{subcl.__name__} at offset <UNK>: "
+            #      f"applying init_common")
+            init_common(self)
+        self._at = offset = parsefile.tell()
+        padlen = -offset % cls.ALIGNMENT
+        if padlen:
             padding = parsefile.read(-offset % cls.ALIGNMENT)
             if any(padding):
                 raise ParseError(f"nonzero padding at offset {offset}")
+            self._at = offset = offset + padlen
+        if maxfin is None:
+            #print(f"{subcl.__name__}: guessing maxfin: {self.SIZE=}")
+            maxfin = offset + self.SIZE
+        self._maxfin = maxfin
+        return self._parse(parsefile)
+
+    def _parse(self, parsefile):
+        cls = subcl = type(self)
+        offset = self._at
         if hasattr(cls, '_struct'):
-            vals = cls._readstruct(parsefile)
+            vals = self._readstruct(parsefile)
             if cls._named:
                 namemap = cls._named(*vals)._asdict()
             else:
                 namemap = dict(enumerate(vals))
             self.__dict__.update(namemap)
+            for k, v in namemap.items():
+                # TODO
+                self._actual_offsets[k] = offset
+                self._actual_roffsets[k] = parsefile.tell()
         retype = False
         for field, tp in cls.__annotations_all__.items():
             if field in self.__dict__:
                 continue
+            #print(f"{subcl.__name__} at offset {offset}: "
+            #      f"parsing a {tp} {field}\n ({self.__dict__=})")
+            self._actual_offsets[field] = parsefile.tell()
+            extra = {}
+            if issubclass(tp, Array):
+                try:
+                    extra = {'_init_common': self.init_common}
+                except AttributeError:
+                    pass
             try:
-                val = tp(parsefile)
+                val = tp((parsefile, self._maxfin), **extra)
             except ValueError:
                 raise ParseError(f"{subcl.__name__} at offset {offset}: "
                                  f"invalid {tp.__name__} {field}")
+            except TypeError:
+                #print(f"{tp=}")
+                raise
+            self._actual_roffsets[field] = parsefile.tell()
             try:
                 defval = getattr(cls, field)
             except AttributeError:
                 pass
             else:
                 if defval != val:
-                    raise ParseError(f"{parseobj} at offset {offset}: "
+                    raise ParseError(f"{subcl.__name__} at offset {offset}: "
                                      f"expected {defval}, found {val}")
             if field == self._subclassfield:
                 name = val.name
@@ -168,9 +261,15 @@ class Structure(metaclass=StructureMeta):
                 except StopIteration:
                     raise RuntimeError(f"subclass {name} not found")
             setattr(self, field, val)
+
+            hook = self._hooks.get(field)
+            if hook:
+                hook(self)
         if retype and not issubclass(subcl, retype):
             return retype(self, parsefile=parsefile)
         print(f"Parsed: {self!r}")
+        self._fin = parsefile.tell()
+        self._validate()
         return self
 
     def __contains__(self, key):
@@ -201,11 +300,14 @@ def get_base_type(tp, metaclass=StructureMeta):
             if isinstance(parseobj, tp):
                 val = parseobj
             else:
-                parsefile = cls._parsefile(parseobj)
-                val, = cls._readstruct(parsefile)
-            self = tp.__new__(subcl, val)
+                parsefile, _ = cls._parsefile(parseobj)
+            self = tp.__new__(subcl, cls._parse(parsefile))
             print(f"Parsed: {self!r}")
             return self
+        @classmethod
+        def _parse(cls, parsefile):
+            val, = cls._readstruct(parsefile)
+            return val
         def __repr__(self):
             return f"<{type(self).__name__}: {super().__repr__()}>"
     return BaseType
@@ -229,8 +331,9 @@ def BuildEnum(ft, cls):
 
 class EfficientUInt63(UInt32):
     @property
-    def _struc(self):
+    def _struct(self):
         return Struct('I' if self < 0x80000000 else 'Q')
+    _rdstruct = Struct('i')
 
 class ZlibReader:
     def __init__(self, fp):
@@ -247,7 +350,11 @@ class ZlibReader:
             raise ValueError("No reading everything!!!")
         ret = self._readbuf.read(n)
         while len(ret) < n:
-            ret += self._obj.decompress(self._fp.read(1))
+            rd = self._fp.read(1)
+            if not rd:
+                ret += self._obj.flush()
+                break
+            ret += self._obj.decompress(rd)
         self._readbuf = BytesIO(ret[n:])
         ret = ret[:n]
         self._off += len(ret)
@@ -258,6 +365,37 @@ class Zlib(Structure):
     @classmethod
     def __new__(cls, subcl, parseobj):
         if cls._template:
-            raise TemplateNeeded()
-        parsefile = cls._parsefile(parseobj)
-        return cls._tp(ZlibReader(parseobj))
+            raise TemplateNeeded(cls.__name__)
+        parsefile, _ = cls._parsefile(parseobj)
+        return cls._tp(ZlibReader(parsefile))
+
+class Array(list, Structure):
+    _template = '_tp',
+    @classmethod
+    def __new__(cls, subcl, parseobj, _init_common=None):
+        print(parseobj)
+        if cls._template:
+            raise TemplateNeeded(subcl.__name__)
+        self = super().__new__(subcl)
+        parsefile, self._maxfin = cls._parsefile(parseobj)
+        if _init_common:
+            self._init_common = _init_common
+        return self._parse(parsefile)
+
+    def _parse(self, fileobj):
+        while fileobj.tell() < self._maxfin:
+            if self._init_common:
+                obj = self._tp(fileobj, init_common=self._init_common)
+            else:
+                obj = self._tp(fileobj)
+            self.append(obj)
+
+class UTF16String(Structure): # str
+    def _parse(self, fileobj):
+        print(f"{self._maxfin=}, {fileobj.tell()=}")
+        rd = fileobj.read(self._maxfin - fileobj.tell())
+        return rd.decode('UTF-16')
+
+class UnknownPayload(Structure): # bytes
+    def _parse(self, fileobj):
+        return fileobj.read(self._maxfin - fileobj.tell())
