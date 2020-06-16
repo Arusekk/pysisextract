@@ -1,4 +1,5 @@
 
+import os
 import zlib
 from enum import Enum, EnumMeta
 from io import BytesIO
@@ -16,7 +17,16 @@ class Unknown(float):
 
 UNKNOWN = Unknown('inf')
 
-class StructurePayloadLength:
+class Attribute:
+    @staticmethod
+    def mkvalidator(key):
+        return lambda self: None
+
+    @staticmethod
+    def parsedhook(key):
+        return lambda self: None
+
+class StructurePayloadLength(Attribute):
     @staticmethod
     def mkvalidator(key):
         def ret(self):
@@ -37,8 +47,26 @@ class StructurePayloadLength:
             #print(f"Fixed maxfin to {self._maxfin=}")
         return ret
 
-class StructureSubClass:
-    pass
+class CanBeLast(Attribute):
+    @staticmethod
+    def parsedhook(key):
+        def ret(self):
+            if self._actual_roffsets[key] == self._maxfin:
+                return True
+        return ret
+
+class SkipNextIfByte(Attribute):
+    def __init__(self, nextkey, byte):
+        self.nextkey = nextkey
+        self.byte = byte
+
+    def parsedhook(skip, key):
+        def ret(self):
+            value = getattr(self, key)
+            if self._peekbyte() == skip.byte:
+                setattr(self, skip.nextkey, None)
+        return ret
+
 
 class StructureAnnotations(dict):
     def __init__(self, pardict):
@@ -207,9 +235,21 @@ class Structure(metaclass=StructureMeta):
             #print(f"{subcl.__name__}: guessing maxfin: {self.SIZE=}")
             maxfin = offset + self.SIZE
         self._maxfin = maxfin
-        return self._parse(parsefile)
+        self._file = parsefile
+        try:
+            return self._parse(parsefile)
+        finally:
+            self._file = None
+
+    def _peekbyte(self):
+        if self._file is None:
+            raise EOFError("cannot peek when parsing is done")
+        byte, = self._file.read(1)
+        self._file.seek(-1, os.SEEK_CUR)
+        return byte
 
     def _parse(self, parsefile):
+        self._file = parsefile
         cls = subcl = type(self)
         offset = self._at
         if hasattr(cls, '_struct'):
@@ -264,7 +304,8 @@ class Structure(metaclass=StructureMeta):
 
             hook = self._hooks.get(field)
             if hook:
-                hook(self)
+                if hook(self):
+                    break
         if retype and not issubclass(subcl, retype):
             return retype(self, parsefile=parsefile)
         print(f"Parsed: {self!r}")
@@ -345,23 +386,35 @@ class ZlibReader:
     def tell(self):
         return self._off
 
+    def seek(self, offset, whence):
+        assert whence == os.SEEK_CUR
+        assert offset == -1
+        assert self._readbuf.tell()
+
+        self._off += offset
+        ret = self._readbuf.seek(offset, whence)
+        return ret
+
     def read(self, n):
         if n < 0:
             raise ValueError("No reading everything!!!")
         ret = self._readbuf.read(n)
-        rd = None
-        while len(ret) < n:
-            rd = self._fp.read(1)
-            if not rd:
-                ret += self._obj.flush()
-                break
-            ret += self._obj.decompress(rd)
-        if rd is not None:
-            self._readbuf = BytesIO(ret[n:])
-            ret = ret[:n]
+        if len(ret) < n:
+            while len(ret) < n:
+                rd = self._fp.read(1)
+                if not rd:
+                    ret += self._obj.flush()
+                    break
+                ret += self._obj.decompress(rd)
+            self._readbuf = BytesIO(ret)
+            ret = self._readbuf.read(n)
         self._off += len(ret)
         print(f'read({n}): {ret!r}')
         return ret
+
+    def close(self):
+        while not self._obj.eof():
+            self.read(1)
 
 class Zlib(Structure):
     _template = '_tp',
@@ -380,15 +433,14 @@ class Array(list, Structure):
             raise TemplateNeeded(subcl.__name__)
         self = super().__new__(subcl)
         parsefile, self._maxfin = cls._parsefile(parseobj)
-        if _init_common:
-            self._init_common = _init_common
+        self._init_common = _init_common
         return self._parse(parsefile)
 
     def __init__(self, *args, **kw):
         return
 
     def _parse(self, fileobj):
-        while fileobj.tell() < self._maxfin:
+        while fileobj.tell() <= self._maxfin - self._tp.ALIGNMENT:
             if self._init_common:
                 obj = self._tp(fileobj, init_common=self._init_common)
             else:

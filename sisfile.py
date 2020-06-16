@@ -3,7 +3,10 @@
 from enum import IntEnum
 from util.binfile import (
     Structure,
+    Attribute,
     StructurePayloadLength,
+    CanBeLast,
+    SkipNextIfByte,
     EfficientUInt63,
     BuildEnum,
     Zlib,
@@ -125,8 +128,8 @@ class SISVersion(SISField):
 class SISVersionRange(SISField):
     # Length = 40  # can be 20 as well
     FromVersion : SISVersion
+    FromVersion : CanBeLast
     ToVersion : SISVersion
-    #ToVersion : Optional
 
 class SISDate(SISField):
     Length = 4
@@ -222,11 +225,14 @@ class SISHash(SISField):
 class SISFileDescription(SISField):
     Target : SISString
     MIMEType : SISString
+
+    MIMEType : SkipNextIfByte('Capabilities', TField.SISHash & 255)
+    # "This field is optional"
     Capabilities : SISCapabilities
     Hash : SISHash
     Operation : TUint32
     OperationOptions : TUint32
-    Length : TUint64
+    FileLength : TUint64 # originally called Length, but clashes with SISField.Length
     UncompressedLength : TUint64
     FileIndex : TUint32
 
@@ -264,6 +270,9 @@ class SISController(SISField):
     Languages : SISSupportedLanguages
     Prerequisites : SISPrerequisites
     Properties : SISProperties
+
+    Properties : SkipNextIfByte('Logo', TField.SISInstallBlock & 255)
+    # "This field is optional"
     Logo : SISLogo
     InstallBlock : SISInstallBlock
     Signature0 : SISSignatureCertificateChain
@@ -291,7 +300,9 @@ class SISExpression(SISField):
     Operator : TUint32 # TOperator
     IntegerValue : TInt32
     StringValue : SISString
+    StringValue : CanBeLast
     LeftExpression : SISField # should be SISExpression
+    LeftExpression : CanBeLast
     RightExpression : SISField # should be SISExpression
 
 class SISElseIf(SISField):
