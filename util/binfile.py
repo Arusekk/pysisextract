@@ -220,10 +220,6 @@ class Structure(metaclass=StructureMeta):
             self._actual_roffsets = {}
         if parseobj is None:
             return self
-        if init_common:
-            #print(f"{subcl.__name__} at offset <UNK>: "
-            #      f"applying init_common")
-            init_common(self)
         self._at = offset = parsefile.tell()
         padlen = -offset % cls.ALIGNMENT
         if padlen:
@@ -235,6 +231,8 @@ class Structure(metaclass=StructureMeta):
             #print(f"{subcl.__name__}: guessing maxfin: {self.SIZE=}")
             maxfin = offset + self.SIZE
         self._maxfin = maxfin
+        if init_common:
+            init_common(self)
         self._file = parsefile
         try:
             return self._parse(parsefile)
@@ -271,7 +269,7 @@ class Structure(metaclass=StructureMeta):
             #      f"parsing a {tp} {field}\n ({self.__dict__=})")
             self._actual_offsets[field] = parsefile.tell()
             extra = {}
-            if issubclass(tp, Array):
+            if issubclass(tp, (Array, Zlib)):
                 try:
                     extra = {'_init_common': self.init_common}
                 except AttributeError:
@@ -420,12 +418,12 @@ class ZlibReader:
 class Zlib(Structure):
     _template = '_tp',
     @classmethod
-    def __new__(cls, subcl, parseobj):
+    def __new__(cls, subcl, parseobj, _init_common=None):
         if cls._template:
             raise TemplateNeeded(cls.__name__)
         parsefile, _ = cls._parsefile(parseobj)
         zreader = ZlibReader(parsefile)
-        ret = cls._tp(zreader)
+        ret = cls._tp(zreader, init_common=_init_common)
         zreader.close()
         return ret
 

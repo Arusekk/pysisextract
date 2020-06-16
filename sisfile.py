@@ -118,6 +118,9 @@ class SISCompressedNone(SISCompressed):
 class SISCompressedDeflate(SISCompressed):
     CompressedData : Zlib['_tp']
 
+    def init_common(self, obj):
+        obj._maxfin = self.UncompressedDataSize
+
 class SISVersion(SISField):
     Length = 12
     # -1 means Any
