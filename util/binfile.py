@@ -400,21 +400,22 @@ class ZlibReader:
             raise ValueError("No reading everything!!!")
         ret = self._readbuf.read(n)
         if len(ret) < n:
-            while len(ret) < n:
+            while len(ret) < n and not self._obj.eof:
                 rd = self._fp.read(1)
+                #print(f"{rd=}")
                 if not rd:
                     ret += self._obj.flush()
                     break
                 ret += self._obj.decompress(rd)
+                #print(f"{ret=}")
             self._readbuf = BytesIO(ret)
             ret = self._readbuf.read(n)
         self._off += len(ret)
-        print(f'read({n}): {ret!r}')
+        #print(f'read({n}): {ret!r} ({self._obj=}, {self._obj.eof=})')
         return ret
 
     def close(self):
-        while not self._obj.eof():
-            self.read(1)
+        self.read(1)
 
 class Zlib(Structure):
     _template = '_tp',
@@ -423,7 +424,10 @@ class Zlib(Structure):
         if cls._template:
             raise TemplateNeeded(cls.__name__)
         parsefile, _ = cls._parsefile(parseobj)
-        return cls._tp(ZlibReader(parsefile))
+        zreader = ZlibReader(parsefile)
+        ret = cls._tp(zreader)
+        zreader.close()
+        return ret
 
 class Array(list, Structure):
     _template = '_tp',
