@@ -328,3 +328,4 @@ def extract_files(fp, target_dir):
         name = os.path.join(target_dir, f.Target.String.split('\\')[-1] or "%d"%f.FileIndex)
         with open(name, 'wb') as ofp:
             ofp.write(fd.FileData.CompressedData)
+    return ff

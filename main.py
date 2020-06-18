@@ -27,4 +27,4 @@ with arg.ifile as fp:
             fp.seek(0)
             continue
         print(hdr)
-        payloadfunc(fp, arg.target_dir)
+        ff = payloadfunc(fp, arg.target_dir)

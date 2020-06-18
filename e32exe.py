@@ -103,6 +103,14 @@ class ValidateUidChecksum(Attribute):
                 raise ValueError(f"Incorrect crc: {value:x} (correct: {crc:x})")
         return ret
 
+class TCpu(IntEnum):
+    ECpuUnknown = 0
+    ECpuX86 = 0x1000
+    ECpuArmV4 = 0x2000
+    ECpuArmV5 = 0x2001
+    ECpuArmV6 = 0x2002
+    ECpuMCore = 0x4000
+
 class E32ImageHeader(Structure):
     iUid1 : TUint32				# KDynamicLibraryUidValue or KExecutableImageUidValue
     iUid2 : TUint32				# Second UID for executable.
@@ -137,7 +145,8 @@ class E32ImageHeader(Structure):
     iCodeRelocOffset : TUint		# Offset into file of the code relocation section (E32RelocSection).
     iDataRelocOffset : TUint		# Offset into file of the data relocation section (E32RelocSection).
     iProcessPriority : TUint16	# Initial runtime process priorty for an EXE. (Value from enum TProcessPriority.)
-    iCpuIdentifier : TUint16		# Value from enum TCpu which indicates the CPU architecture for which the image was created
+    #iCpuIdentifier : TUint16		# Value from enum TCpu which indicates the CPU architecture for which the image was created
+    iCpuIdentifier : BuildEnum(TUint16, TCpu)
 
 def objcopy(fp, target_dir):
     pass
