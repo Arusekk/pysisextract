@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 from enum import IntEnum
 from util.binfile import (
     Structure,
@@ -316,3 +317,14 @@ class SISIf(SISField):
     Expression : SISExpression
     InstallBlock : SISInstallBlock
     ElseIfs : SISArray[SISElseIf]
+
+def extract_files(fp, target_dir):
+    ff = SISField(fp)
+    for f in ff.Controller.CompressedData.InstallBlock.Files.Contents:
+        fd = ff.Data.DataUnits.Contents[0].FileData.Contents[f.FileIndex]
+        print(fd.FileData.CompressedData)
+        print(f.Target)
+        print(f.MIMEType)
+        name = os.path.join(target_dir, f.Target.String.split('\\')[-1] or "%d"%f.FileIndex)
+        with open(name, 'wb') as ofp:
+            ofp.write(fd.FileData.CompressedData)

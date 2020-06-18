@@ -1,6 +1,7 @@
 
 import os
 import zlib
+import time
 from enum import Enum, EnumMeta
 from io import BytesIO
 from struct import Struct
@@ -205,6 +206,9 @@ class Structure(metaclass=StructureMeta):
         for validator in self._validators:
             validator(self)
 
+    def _tobytes(self):
+        return self._struct.pack(self)
+
     @classmethod
     def __new__(cls, subcl, parseobj=None, parsefile=None, init_common=None):
         if cls._template:
@@ -351,9 +355,15 @@ def get_base_type(tp, metaclass=StructureMeta):
             return f"<{type(self).__name__}: {super().__repr__()}>"
     return BaseType
 
-BaseType = get_base_type(int)
+class hexint(int):
+    def __repr__(self):
+        return hex(self)
+
+BaseType = get_base_type(hexint)
 
 Int32 = StructureMeta.from_struct('i', name='Int32', bases=BaseType)
+Int16 = StructureMeta.from_struct('h', name='Int16', bases=BaseType)
+Int8 = StructureMeta.from_struct('b', name='Int8', bases=BaseType)
 UInt64 = StructureMeta.from_struct('Q', name='UInt64', bases=BaseType)
 UInt32 = StructureMeta.from_struct('I', name='UInt32', bases=BaseType)
 UInt16 = StructureMeta.from_struct('H', name='UInt16', bases=BaseType)
