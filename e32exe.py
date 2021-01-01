@@ -24,15 +24,19 @@ from util.binfile import (
     UTF16String,
     Array,
     UnknownPayload,
+    CountIn,
 )
+from util.bitstream import Decompressor
 
 TInt = Int32
 TInt16 = Int16
 TInt8 = Int8
 TUint32 = TUint = UInt32
 TUint16 = UInt16
+TUint8 = UInt8
 
 crc16tab = array.array('H', [
+    # kernel/eka/euser/us_func.cpp:53
     0x0000,0x1021,0x2042,0x3063,0x4084,0x50a5,0x60c6,0x70e7,0x8108,0x9129,0xa14a,
     0xb16b,0xc18c,0xd1ad,0xe1ce,0xf1ef,0x1231,0x0210,0x3273,0x2252,0x52b5,0x4294,
     0x72f7,0x62d6,0x9339,0x8318,0xb37b,0xa35a,0xd3bd,0xc39c,0xf3ff,0xe3de,0x2462,
@@ -111,6 +115,15 @@ class TCpu(IntEnum):
     ECpuArmV6 = 0x2002
     ECpuMCore = 0x4000
 
+class SCapabilitySet(Structure):
+    iCaps1 : TUint32
+    iCaps2 : TUint32
+
+class SSecurityInfo(Structure):
+    iSecureId : TUint32
+    iVendorId : TUint32
+    iCaps : SCapabilitySet   # Capabilities re. platform security
+
 class E32ImageHeader(Structure):
     iUid1 : TUint32				# KDynamicLibraryUidValue or KExecutableImageUidValue
     iUid2 : TUint32				# Second UID for executable.
@@ -147,6 +160,169 @@ class E32ImageHeader(Structure):
     iProcessPriority : TUint16	# Initial runtime process priorty for an EXE. (Value from enum TProcessPriority.)
     #iCpuIdentifier : TUint16		# Value from enum TCpu which indicates the CPU architecture for which the image was created
     iCpuIdentifier : BuildEnum(TUint16, TCpu)
+    iCpuIdentifier : CanBeLast
+
+    iUncompressedSize : TUint32		# Uncompressed size of file data after the header, or zero if file not compressed.
+    iUncompressedSize : CanBeLast
+
+    iS : SSecurityInfo		# Platform Security information of executable.
+    iExceptionDescriptor : TUint32	# Offset in bytes from start of code section to Exception Descriptor, bit 0 set if valid.
+    iSpare2 : TUint32 = 0		# Reserved for future use. Set to zero.
+    iExportDescSize : TUint16	# Size of export description stored in iExportDesc.
+    iExportDescType : TUint8	# Type of description of holes in export table
+    iExportDesc : Array[TUint8]		# Description of holes in export table, size given by iExportDescSize..
+    iExportDesc : CountIn('iExportDescSize')
+
+
+# list of 0xaaaabbbb
+# where aa is 4*index or 2*ans+1 if bit is 1
+# where bb is 4*index or 2*ans+1 if bit is 0
+def HuffmanL(L, idx=0, s=1):
+    idx = (idx >> 16) & 0xffff
+    if idx & 1:
+        return {s: idx >> 1}
+    if idx & 3 or (s > 1 and idx <= 0):
+        raise ValueError("incorrect HuffmanL value for code %r" % bin(s)[3:])
+    L = L[idx//4:]
+    idx = L[0]
+    d = {}
+    s <<= 1
+    if s.bit_length() > 32:
+        raise ValueError("too long huffman code")
+    d.update(HuffmanL(L, idx << 16, s))
+    d.update(HuffmanL(L, idx,     s|1))
+    return d
+
+HuffmanDecoding = HuffmanL([
+    # kernel/eka/euser/us_decode.cpp:119
+    0x0004006c,
+    0x00040064,
+    0x0004005c,
+    0x00040050,
+    0x00040044,
+    0x0004003c,
+    0x00040034,
+    0x00040021,
+    0x00040023,
+    0x00040025,
+    0x00040027,
+    0x00040029,
+    0x00040014,
+    0x0004000c,
+    0x00040035,
+    0x00390037,
+    0x00330031,
+    0x0004002b,
+    0x002f002d,
+    0x001f001d,
+    0x001b0019,
+    0x00040013,
+    0x00170015,
+    0x0004000d,
+    0x0011000f,
+    0x000b0009,
+    0x00070003,
+    0x00050001
+])
+
+class E32HuffmanStream(Decompressor):
+    KDeflateLengthMag = 8
+    KDeflateDistanceMag = 12
+
+    KDeflateMinLength = 3
+    KDeflateMaxLength = KDeflateMinLength - 1 + (1 << KDeflateLengthMag)
+    KDeflateMaxDistance = (1 << KDeflateDistanceMag)
+    KDeflateDistCodeBase = 0x200
+
+    KDeflateHashMultiplier = 0xAC4B9B19
+    KDeflateHashShift = 24
+
+    ELiterals = 256
+    ELengths = (KDeflateLengthMag - 1) * 4
+    ESpecials = 1
+    EDistances = (KDeflateDistanceMag - 1) * 4
+    ELitLens = ELiterals + ELengths + ESpecials
+    EEos = ELiterals + ELengths
+
+    KDeflationCodes = ELitLens + EDistances
+
+    def __init__(self):
+        super().__init__()
+        self._iEncoding = []
+        self._mtf_list = bytearray(range(28)) # 28 == KMetaCodes == len(HuffmanDecoding)
+
+    def InternalizeL(self):
+        last = 0
+        while len(self._iEncoding) < self.KDeflationCodes:
+            c = self.nextunit(HuffmanDecoding)
+            if self._iEncoding:
+                last = self._iEncoding[-1]
+            if c < 2:
+                # run-length encoding
+                self._iEncoding.extend([last] * (c + 1))
+                continue
+            # move to first
+            self._mtf_list.insert(0, last)
+            self._iEncoding.append(self._mtf_list.pop(c))
+        self._lldecoding = self.HuffmanDecoding(self._iEncoding[:self.ELitLens])
+        self._ddecoding = self.HuffmanDecoding(self._iEncoding[self.ELitLens:], self.ELitLens)
+
+    # destroys arr
+    def HuffmanDecoding(self, arr, base=0):
+        d = {}
+        noflength = [0] * 27 # 27 == KMaxCodeLength
+        codes = 0
+        for ii, length in enumerate(arr):
+            length -= 1
+            if length >= 0:
+                noflength[length] += 1
+                codes += 1
+
+        levels = [[] for _ in noflength]
+        for ii, length in enumerate(arr):
+            levels[length - 1].insert(0, ii + base)
+
+        aDecodeTree = sum(levels, [])
+        if codes == 1:
+            # special case: incomplete tree
+            # 0- and 1-terminate at root
+            # (actually in original deflate 1 would raise an error)
+            return {0b10: aDecodeTree[0], 0b11: aDecodeTree[0]}
+        else:
+            return self.HuffmanSubTree(levels)
+
+    def HuffmanSubTree(self, levels, s=1):
+        l = levels[0]
+        if l:
+            return {s: l.pop(0)}
+        levels = levels[1:]
+        d = {}
+        s <<= 1
+        d.update(self.HuffmanSubTree(levels, s))
+        d.update(self.HuffmanSubTree(levels, s|1))
+        return d
+
+    def nextbyte(self):
+        self.InternalizeL()
+        return self.transform(self.nextunit(self._decoding))
+
+    def iterbytes(self):
+        self.InternalizeL()
+        for l in self.iterunits(self._lldecoding):
+            if l < self.ELiterals:
+                yield l
+            elif l == self.EEos:
+                return
+            else:
+                d = self.nextunit(self._ddecoding)
+                yield from self.repeat(l - self.ELiterals, d)
+
+    def __iter__(self):
+        return self.iterbytes()
 
 def objcopy(fp, target_dir):
-    pass
+    fp.read(1)
+    h = E32HuffmanStream()
+    h.feed(fp.read())
+    for b in h:
+        print(hex(b))

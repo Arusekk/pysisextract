@@ -24,6 +24,10 @@ class Attribute:
         return lambda self: None
 
     @staticmethod
+    def preparsehook(key):
+        return lambda self: {}
+
+    @staticmethod
     def parsedhook(key):
         return lambda self: None
 
@@ -46,6 +50,16 @@ class StructurePayloadLength(Attribute):
             value = getattr(self, key)
             self._maxfin = self._actual_roffsets[key] + value
             #print(f"Fixed maxfin to {self._maxfin=}")
+        return ret
+
+class CountIn(Attribute):
+    def __init__(self, field):
+        self._field = field
+
+    def preparsehook(self, key):
+        def ret(self2):
+            value = getattr(self2, self._field)
+            return {'_maxcount': value}
         return ret
 
 class CanBeLast(Attribute):
@@ -76,7 +90,8 @@ class StructureAnnotations(dict):
     def __setitem__(self, key, val):
         if key in self:
             self.pardict['_validators'].append(val.mkvalidator(key))
-            self.pardict['_hooks'][key] = val.parsedhook(key)
+            self.pardict['_hooks']['__post_' + key] = val.parsedhook(key)
+            self.pardict['_hooks']['__pre_' + key] = val.preparsehook(key)
             return
         self.pardict['_offsets'][key] = self.pardict['SIZE']
         if isinstance(val, Structure):
@@ -278,6 +293,9 @@ class Structure(metaclass=StructureMeta):
                     extra = {'_init_common': self.init_common}
                 except AttributeError:
                     pass
+            hook = self._hooks.get('__pre_' + field)
+            if hook:
+                extra.update(hook(self))
             try:
                 val = tp((parsefile, self._maxfin), **extra)
             except ValueError:
@@ -304,7 +322,7 @@ class Structure(metaclass=StructureMeta):
                     raise RuntimeError(f"subclass {name} not found")
             setattr(self, field, val)
 
-            hook = self._hooks.get(field)
+            hook = self._hooks.get('__post_' + field)
             if hook:
                 if hook(self):
                     break
@@ -334,7 +352,10 @@ class Structure(metaclass=StructureMeta):
                 yield key, val
 
     def __repr__(self):
-        return f"""<{self.__class__.__name__}:  {", ".join(f"{key}={value!r}" for key, value in self._fields())}>"""
+        *f, = self._fields()
+        sep = ',\n' if len(f) > 4 else ', '
+        fieldrep = sep.join(f"{key}={value!r}" for key, value in f).replace('\n', '\n    ')
+        return f"""<{self.__class__.__name__}:  {fieldrep}>"""
 
 def get_base_type(tp, metaclass=StructureMeta):
     class BaseType(tp, Structure, metaclass=metaclass):
@@ -440,19 +461,22 @@ class Zlib(Structure):
 class Array(list, Structure):
     _template = '_tp',
     @classmethod
-    def __new__(cls, subcl, parseobj, _init_common=None):
+    def __new__(cls, subcl, parseobj, _init_common=None, _maxcount=0x80000000):
         if cls._template:
             raise TemplateNeeded(subcl.__name__)
         self = super().__new__(subcl)
         parsefile, self._maxfin = cls._parsefile(parseobj)
         self._init_common = _init_common
+        self._maxcount = _maxcount
         return self._parse(parsefile)
 
     def __init__(self, *args, **kw):
         return
 
     def _parse(self, fileobj):
-        while fileobj.tell() <= self._maxfin - self._tp.ALIGNMENT:
+        for i in range(self._maxcount):
+            if fileobj.tell() > self._maxfin - self._tp.ALIGNMENT:
+                break
             if self._init_common:
                 obj = self._tp(fileobj, init_common=self._init_common)
             else:

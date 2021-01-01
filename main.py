@@ -28,3 +28,4 @@ with arg.ifile as fp:
             continue
         print(hdr)
         ff = payloadfunc(fp, arg.target_dir)
+        break
