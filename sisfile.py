@@ -318,7 +318,7 @@ class SISIf(SISField):
     InstallBlock : SISInstallBlock
     ElseIfs : SISArray[SISElseIf]
 
-def extract_files(fp, target_dir):
+def extract_files(fp, header, target_dir):
     ff = SISField(fp)
     for f in ff.Controller.CompressedData.InstallBlock.Files.Contents:
         fd = ff.Data.DataUnits.Contents[0].FileData.Contents[f.FileIndex]

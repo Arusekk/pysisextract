@@ -27,5 +27,5 @@ with arg.ifile as fp:
             fp.seek(0)
             continue
         print(hdr)
-        ff = payloadfunc(fp, arg.target_dir)
+        ff = payloadfunc(fp, hdr, arg.target_dir)
         break

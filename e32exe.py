@@ -1,29 +1,25 @@
 #!/usr/bin/env python3
 
 import array
+import os.path
 import time
+from subprocess import Popen, PIPE
 from enum import IntEnum
+
 from util.binfile import (
     Structure,
     Attribute,
-    StructurePayloadLength,
     StructureMeta,
     get_base_type,
     CanBeLast,
-    SkipNextIfByte,
-    EfficientUInt63,
     BuildEnum,
-    Zlib,
     Int32,
     Int16,
     Int8,
-    UInt64,
     UInt32,
     UInt16,
     UInt8,
-    UTF16String,
     Array,
-    UnknownPayload,
     CountIn,
 )
 from util.bitstream import Decompressor
@@ -63,15 +59,18 @@ crc16tab = array.array('H', [
     0x3eb2,0x0ed1,0x1ef0
 ])
 
+
 def crc16(bts):
     crc = 0
     for b in bts:
         crc = (crc << 8 ^ crc16tab[b ^ crc >> 8 & 0xff]) & 0xffff
     return crc
 
+
 def uidcrc(u1, u2, u3):
     b = u1._tobytes() + u2._tobytes() + u3._tobytes()
     return crc16(b[1::2]) << 16 | crc16(b[::2])
+
 
 class timeint(int):
     # This number is huge. Dividing it by 1000 is not enough.
@@ -90,12 +89,15 @@ class timeint(int):
 
     def __repr__(self):
         return time.ctime(self / 1e6 + time.mktime((0,)*9))
-Millis64Since2000 = StructureMeta.from_struct('Q', name='Millis64Since2000', bases=get_base_type(timeint))
+Millis64Since2000 = StructureMeta.from_struct('Q', name='Millis64Since2000',
+                                              bases=get_base_type(timeint))
+
 
 class TVersion(Structure):
     iMajor : TInt8
     iMinor : TInt8
     iBuild : TInt16
+
 
 class ValidateUidChecksum(Attribute):
     @staticmethod
@@ -104,8 +106,10 @@ class ValidateUidChecksum(Attribute):
             value = getattr(self, key)
             crc = uidcrc(self.iUid1, self.iUid2, self.iUid3)
             if value != crc:
-                raise ValueError(f"Incorrect crc: {value:x} (correct: {crc:x})")
+                raise ValueError(
+                    f"Incorrect crc: {value:x} (correct: {crc:x})")
         return ret
+
 
 class TCpu(IntEnum):
     ECpuUnknown = 0
@@ -115,14 +119,24 @@ class TCpu(IntEnum):
     ECpuArmV6 = 0x2002
     ECpuMCore = 0x4000
 
+    def toAsMachine(self):
+        return {
+            self.ECpuArmV4: 'armv4',
+            self.ECpuArmV5: 'armv5',
+            self.ECpuArmV6: 'armv6',
+        }[self]
+
+
 class SCapabilitySet(Structure):
     iCaps1 : TUint32
     iCaps2 : TUint32
+
 
 class SSecurityInfo(Structure):
     iSecureId : TUint32
     iVendorId : TUint32
     iCaps : SCapabilitySet   # Capabilities re. platform security
+
 
 class E32ImageHeader(Structure):
     iUid1 : TUint32				# KDynamicLibraryUidValue or KExecutableImageUidValue
@@ -130,10 +144,10 @@ class E32ImageHeader(Structure):
     iUid3 : TUint32				# Third UID for executable.
     iUidChecksum : TUint32		# Checksum for iUid1, iUid2 and iUid3.
     iUidChecksum : ValidateUidChecksum
-    iSignature : TUint = int.from_bytes(b'EPOC', 'little')	# Contains 'EPOC'.
+    iSignature : TUint = int.from_bytes(b'EPOC', 'little')  # Contains 'EPOC'.
     iHeaderCrc : TUint32			# CRC-32 of entire header. @see #KImageCrcInitialiser.
     iModuleVersion : TUint32		# Version number for this executable (used in link resolution).
-    iCompressionType : TUint32	# Type of compression used for file contents located after the header. (UID or 0 for none).
+    iCompressionType : TUint32  # Type of compression used for file contents located after the header. (UID or 0 for none).
     iToolsVersion : TVersion		# Version number of tools which generated this file.
     #iTimeLo : TUint32			# Least significant 32 bits of the time of image creation, in milliseconds since since midnight Jan 1st, 2000.
     #iTimeHi : TUint32			# Most significant 32 bits of the time of image creation, in milliseconds since since midnight Jan 1st, 2000.
@@ -166,10 +180,10 @@ class E32ImageHeader(Structure):
     iUncompressedSize : CanBeLast
 
     iS : SSecurityInfo		# Platform Security information of executable.
-    iExceptionDescriptor : TUint32	# Offset in bytes from start of code section to Exception Descriptor, bit 0 set if valid.
+    iExceptionDescriptor : TUint32  # Offset in bytes from start of code section to Exception Descriptor, bit 0 set if valid.
     iSpare2 : TUint32 = 0		# Reserved for future use. Set to zero.
-    iExportDescSize : TUint16	# Size of export description stored in iExportDesc.
-    iExportDescType : TUint8	# Type of description of holes in export table
+    iExportDescSize : TUint16  # Size of export description stored in iExportDesc.
+    iExportDescType : TUint8  # Type of description of holes in export table
     iExportDesc : Array[TUint8]		# Description of holes in export table, size given by iExportDescSize..
     iExportDesc : CountIn('iExportDescSize')
 
@@ -190,8 +204,9 @@ def HuffmanL(L, idx=0, s=1):
     if s.bit_length() > 32:
         raise ValueError("too long huffman code")
     d.update(HuffmanL(L, idx << 16, s))
-    d.update(HuffmanL(L, idx,     s|1))
+    d.update(HuffmanL(L, idx,   s | 1))
     return d
+
 
 HuffmanDecoding = HuffmanL([
     # kernel/eka/euser/us_decode.cpp:119
@@ -225,6 +240,12 @@ HuffmanDecoding = HuffmanL([
     0x00050001
 ])
 
+
+def bitstring_print(mapping):
+    for k, v in mapping.items():
+        print(f'{bin(k)[3:]}: {v!r}')
+
+
 class E32HuffmanStream(Decompressor):
     KDeflateLengthMag = 8
     KDeflateDistanceMag = 12
@@ -242,87 +263,179 @@ class E32HuffmanStream(Decompressor):
     ESpecials = 1
     EDistances = (KDeflateDistanceMag - 1) * 4
     ELitLens = ELiterals + ELengths + ESpecials
-    EEos = ELiterals + ELengths
+    EEos = ELiterals + ELengths  # unlike 256 in original deflate
 
     KDeflationCodes = ELitLens + EDistances
+
+    little = False
 
     def __init__(self):
         super().__init__()
         self._iEncoding = []
-        self._mtf_list = bytearray(range(28)) # 28 == KMetaCodes == len(HuffmanDecoding)
+        self._mtf_list = bytearray(range(28))  # 28 == KMetaCodes == len(HuffmanDecoding)
+        self._rl = 0
+        self._memory = bytearray()
+        self._decoding = None
 
     def InternalizeL(self):
         last = 0
         while len(self._iEncoding) < self.KDeflationCodes:
             c = self.nextunit(HuffmanDecoding)
+            #print(f'evt {c}')
             if self._iEncoding:
                 last = self._iEncoding[-1]
             if c < 2:
                 # run-length encoding
-                self._iEncoding.extend([last] * (c + 1))
+                rl = self._rl + c + 1
+                self._iEncoding.extend([last] * rl)
+                #for _ in range(rl):
+                #    print(f'rle {last}')
+                self._rl += rl
                 continue
+            self._rl = 0
             # move to first
-            self._mtf_list.insert(0, last)
+            self._mtf_list.insert(1, last)
             self._iEncoding.append(self._mtf_list.pop(c))
+            #print(f'norm {self._iEncoding[-1]}')
+        #print(f'{self._iEncoding}')
         self._lldecoding = self.HuffmanDecoding(self._iEncoding[:self.ELitLens])
-        self._ddecoding = self.HuffmanDecoding(self._iEncoding[self.ELitLens:], self.ELitLens)
+        #print('_lldecoding:')
+        #bitstring_print(self._lldecoding)
 
-    # destroys arr
+        self._ddecoding = self.HuffmanDecoding(self._iEncoding[self.ELitLens:],
+                                               self.KDeflateDistCodeBase)
+        #print('_ddecoding:')
+        #bitstring_print(self._ddecoding)
+
+        if self._decoding is None:
+            self._decoding = self._lldecoding
+
+        code = max(self._ddecoding.values()) - self.KDeflateDistCodeBase
+        # xtra bits
+        xtra = (code >> 2) - 1
+        code -= xtra << 2
+        code <<= xtra
+        code |= (1 << xtra) - 1
+        self._maxd = code + 1
+        print(f"{self._maxd=}")
+
     def HuffmanDecoding(self, arr, base=0):
-        d = {}
-        noflength = [0] * 27 # 27 == KMaxCodeLength
-        codes = 0
+        levels = [[] for _ in range(27)]  # 27 == KMaxCodeLength
         for ii, length in enumerate(arr):
-            length -= 1
-            if length >= 0:
-                noflength[length] += 1
-                codes += 1
-
-        levels = [[] for _ in noflength]
-        for ii, length in enumerate(arr):
-            levels[length - 1].insert(0, ii + base)
+            if length:
+                levels[length].append(ii + base)
 
         aDecodeTree = sum(levels, [])
-        if codes == 1:
+        if len(aDecodeTree) == 1:
             # special case: incomplete tree
             # 0- and 1-terminate at root
-            # (actually in original deflate 1 would raise an error)
+            # (in original deflate 1 would raise an error)
             return {0b10: aDecodeTree[0], 0b11: aDecodeTree[0]}
         else:
-            return self.HuffmanSubTree(levels)
+            print(levels)
+            d = self.HuffmanSubTree(levels)
+            if any(levels):  # should be all empty now
+                raise ValueError("Invalid huffman treeeeeeee!")
+            return d
 
     def HuffmanSubTree(self, levels, s=1):
-        l = levels[0]
-        if l:
-            return {s: l.pop(0)}
+        le = levels[0]
+        if le:
+            return {s: le.pop(0)}
         levels = levels[1:]
-        d = {}
         s <<= 1
+        d = {}
         d.update(self.HuffmanSubTree(levels, s))
-        d.update(self.HuffmanSubTree(levels, s|1))
+        d.update(self.HuffmanSubTree(levels, s | 1))
         return d
+
+    def remember(self, L):
+        for c in L:
+            self._memory.append(c)
+            if len(self._memory) > self._maxd:
+                self._memory.pop(0)
+            yield c
+
+    def repeat(self, le, d):
+        print(f"repeat({le=}, {d=})")
+        for _ in range(le):
+            yield self._memory[-d]
 
     def nextbyte(self):
         self.InternalizeL()
-        return self.transform(self.nextunit(self._decoding))
+        return self.transform(self.nextunit())
 
     def iterbytes(self):
         self.InternalizeL()
-        for l in self.iterunits(self._lldecoding):
-            if l < self.ELiterals:
-                yield l
-            elif l == self.EEos:
+        for val in self.iterunits():
+            if val < self.ELiterals:
+                yield from self.remember([val])
+            elif val == self.EEos:
+                print(f"EOS! {len(self._bits):#x} left")
                 return
             else:
-                d = self.nextunit(self._ddecoding)
-                yield from self.repeat(l - self.ELiterals, d)
+                code = val & 0xff
+                if code >= 8:
+                    # xtra bits
+                    xtra = (code >> 2) - 1
+                    code -= xtra << 2
+                    code <<= xtra
+                    code |= self.nextbits(xtra)
+
+                # length comes first, then the distance
+                if val < self.KDeflateDistCodeBase:
+                    self._rptlength = code + self.KDeflateMinLength
+                    self._decoding = self._ddecoding
+                else:
+                    d = code + 1
+                    yield from self.remember(self.repeat(self._rptlength, d))
+                    print("endrepeat")
+                    self._decoding = self._lldecoding
 
     def __iter__(self):
         return self.iterbytes()
 
-def objcopy(fp, target_dir):
-    fp.read(1)
+
+def objcopy(fp, header, target_dir):
+    fp.seek(header.iCodeOffset)
     h = E32HuffmanStream()
     h.feed(fp.read())
-    for b in h:
-        print(hex(b))
+    with open(os.path.join(target_dir, 'code.bin'), 'wb') as codefp:
+        i = 0
+        for b in h:
+            print(hex(b))
+            codefp.write(bytearray([b]))
+            if i == 222:
+                break
+            i += 1
+
+        # remaining data follows
+
+    #print(hex(fp.tell()))
+    #fp.seek(header.iDataOffset)
+    #with open(os.path.join(target_dir, 'data.bin'), 'wb') as datafp:
+    #    if header.iDataSize:
+    #        for b in h:
+    #            print(hex(b))
+    #            datafp.write(bytearray([b]))
+
+    relo = os.path.join(target_dir, 'rel.o')
+    Popen(['arm-none-eabi-as', '-o', relo], stdin=PIPE,
+          universal_newlines=True).communicate(f'''
+    .arch {header.iCpuIdentifier.toAsMachine()}
+    .section .text
+    .globl _start
+    .globl textstart
+textstart:
+    _start = . + {header.iEntryPoint:#x}
+    .incbin "{target_dir}/code-hwsrv.bin"
+
+    .section .data
+    .globl datastart
+datastart:
+    .incbin "{target_dir}/data.bin"
+    ''')
+    Popen(['arm-none-eabi-ld', '-o', os.path.join(target_dir, 'obj.exe'), relo,
+           f'--section-start=.text={header.iCodeBase:#x}',
+           f'--section-start=.data={header.iDataBase:#x}',
+    ])
