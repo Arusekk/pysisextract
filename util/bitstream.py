@@ -32,12 +32,12 @@ class Bits:
             little = self.little
         acc = 0
         if little:
+            for i in range(n):
+                acc |= self.nextbit() << i
+        else:
             for _ in range(n):
                 acc <<= 1
                 acc |= self.nextbit()
-        else:
-            for i in range(n):
-                acc |= self.nextbit() << i
         return acc
 
     def iterbits(self):

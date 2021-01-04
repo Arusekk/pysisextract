@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 
 import array
+import io
 import os.path
+import struct
 import time
-from subprocess import Popen, PIPE
 from enum import IntEnum
+from subprocess import Popen, PIPE
 
 from util.binfile import (
     Structure,
@@ -13,6 +15,7 @@ from util.binfile import (
     get_base_type,
     CanBeLast,
     BuildEnum,
+    HexintEnum,
     Int32,
     Int16,
     Int8,
@@ -21,6 +24,8 @@ from util.binfile import (
     UInt8,
     Array,
     CountIn,
+    LengthIn,
+    StructureTotalLength,
 )
 from util.bitstream import Decompressor
 
@@ -111,7 +116,7 @@ class ValidateUidChecksum(Attribute):
         return ret
 
 
-class TCpu(IntEnum):
+class TCpu(HexintEnum):
     ECpuUnknown = 0
     ECpuX86 = 0x1000
     ECpuArmV4 = 0x2000
@@ -125,6 +130,12 @@ class TCpu(IntEnum):
             self.ECpuArmV5: 'armv5',
             self.ECpuArmV6: 'armv6',
         }[self]
+
+
+class TCompression(HexintEnum):
+    KFormatNotCompressed = 0
+    KUidCompressionDeflate = 0x101F7AFC
+    KUidCompressionBytePair = 0x102822AA
 
 
 class SCapabilitySet(Structure):
@@ -147,7 +158,8 @@ class E32ImageHeader(Structure):
     iSignature : TUint = int.from_bytes(b'EPOC', 'little')  # Contains 'EPOC'.
     iHeaderCrc : TUint32			# CRC-32 of entire header. @see #KImageCrcInitialiser.
     iModuleVersion : TUint32		# Version number for this executable (used in link resolution).
-    iCompressionType : TUint32  # Type of compression used for file contents located after the header. (UID or 0 for none).
+    #iCompressionType : TUint32  # Type of compression used for file contents located after the header. (UID or 0 for none).
+    iCompressionType : BuildEnum(TUint32, TCompression)
     iToolsVersion : TVersion		# Version number of tools which generated this file.
     #iTimeLo : TUint32			# Least significant 32 bits of the time of image creation, in milliseconds since since midnight Jan 1st, 2000.
     #iTimeHi : TUint32			# Most significant 32 bits of the time of image creation, in milliseconds since since midnight Jan 1st, 2000.
@@ -171,7 +183,7 @@ class E32ImageHeader(Structure):
     iImportOffset : TUint		# Offset into file of the import section (E32ImportSection).
     iCodeRelocOffset : TUint		# Offset into file of the code relocation section (E32RelocSection).
     iDataRelocOffset : TUint		# Offset into file of the data relocation section (E32RelocSection).
-    iProcessPriority : TUint16	# Initial runtime process priorty for an EXE. (Value from enum TProcessPriority.)
+    iProcessPriority : TUint16		# Initial runtime process priorty for an EXE. (Value from enum TProcessPriority.)
     #iCpuIdentifier : TUint16		# Value from enum TCpu which indicates the CPU architecture for which the image was created
     iCpuIdentifier : BuildEnum(TUint16, TCpu)
     iCpuIdentifier : CanBeLast
@@ -188,6 +200,42 @@ class E32ImageHeader(Structure):
     iExportDesc : CountIn('iExportDescSize')
 
 
+class E32RelocType(IntEnum):  # made up names
+    none = 0
+    code = 1
+    data = 2
+    guess = 3
+
+
+class E32RelocEntry(TUint16):  # made up name
+    @property
+    def iOffset(self):
+        return self & 0xfff
+
+    @property
+    def iType(self):
+        return E32RelocType(self >> 12)
+
+    def __repr__(self):
+        return (f"<{type(self).__name__}: "
+                f"{self.iType.name} @{self.iOffset:#05x}>")
+
+
+class E32RelocBlock(Structure):
+    iPageOffset: TUint32    # Offset, in bytes, for the page being relocated;
+                            # relative to the section start. Always a multiple of the page size: 4096 bytes.
+    iBlockSize: TUint32		# Size, in bytes, for this block structure. Always a multiple of 4.
+    iBlockSize: StructureTotalLength
+    iEntry: Array[E32RelocEntry]  # TUint16
+
+
+class E32RelocSection(Structure):
+    iSize: TInt				# Size of this relocation section including 'this' structure. Always a multiple of 4.
+    iNumberOfRelocs: TInt   # Number of relocations in this section.
+    iRelockBlock: Array[E32RelocBlock]
+    iRelockBlock: LengthIn('iSize')
+
+
 # list of 0xaaaabbbb
 # where aa is 4*index or 2*ans+1 if bit is 1
 # where bb is 4*index or 2*ans+1 if bit is 0
@@ -196,7 +244,7 @@ def HuffmanL(L, idx=0, s=1):
     if idx & 1:
         return {s: idx >> 1}
     if idx & 3 or (s > 1 and idx <= 0):
-        raise ValueError("incorrect HuffmanL value for code %r" % bin(s)[3:])
+        raise ValueError(f"incorrect HuffmanL value for code {bin(s)[3:]!r}")
     L = L[idx//4:]
     idx = L[0]
     d = {}
@@ -246,7 +294,7 @@ def bitstring_print(mapping):
         print(f'{bin(k)[3:]}: {v!r}')
 
 
-class E32HuffmanStream(Decompressor):
+class E32HuffmanStream(Decompressor):  # made up name
     KDeflateLengthMag = 8
     KDeflateDistanceMag = 12
 
@@ -272,7 +320,7 @@ class E32HuffmanStream(Decompressor):
     def __init__(self):
         super().__init__()
         self._iEncoding = []
-        self._mtf_list = bytearray(range(28))  # 28 == KMetaCodes == len(HuffmanDecoding)
+        self._mtf_list = bytearray(range(28))  # 28 == KMetaCodes
         self._rl = 0
         self._memory = bytearray()
         self._decoding = None
@@ -281,31 +329,22 @@ class E32HuffmanStream(Decompressor):
         last = 0
         while len(self._iEncoding) < self.KDeflationCodes:
             c = self.nextunit(HuffmanDecoding)
-            #print(f'evt {c}')
             if self._iEncoding:
                 last = self._iEncoding[-1]
             if c < 2:
                 # run-length encoding
                 rl = self._rl + c + 1
                 self._iEncoding.extend([last] * rl)
-                #for _ in range(rl):
-                #    print(f'rle {last}')
                 self._rl += rl
                 continue
             self._rl = 0
             # move to first
             self._mtf_list.insert(1, last)
             self._iEncoding.append(self._mtf_list.pop(c))
-            #print(f'norm {self._iEncoding[-1]}')
-        #print(f'{self._iEncoding}')
-        self._lldecoding = self.HuffmanDecoding(self._iEncoding[:self.ELitLens])
-        #print('_lldecoding:')
-        #bitstring_print(self._lldecoding)
 
+        self._lldecoding = self.HuffmanDecoding(self._iEncoding[:self.ELitLens])
         self._ddecoding = self.HuffmanDecoding(self._iEncoding[self.ELitLens:],
                                                self.KDeflateDistCodeBase)
-        #print('_ddecoding:')
-        #bitstring_print(self._ddecoding)
 
         if self._decoding is None:
             self._decoding = self._lldecoding
@@ -332,7 +371,6 @@ class E32HuffmanStream(Decompressor):
             # (in original deflate 1 would raise an error)
             return {0b10: aDecodeTree[0], 0b11: aDecodeTree[0]}
         else:
-            print(levels)
             d = self.HuffmanSubTree(levels)
             if any(levels):  # should be all empty now
                 raise ValueError("Invalid huffman treeeeeeee!")
@@ -357,13 +395,8 @@ class E32HuffmanStream(Decompressor):
             yield c
 
     def repeat(self, le, d):
-        print(f"repeat({le=}, {d=})")
         for _ in range(le):
             yield self._memory[-d]
-
-    def nextbyte(self):
-        self.InternalizeL()
-        return self.transform(self.nextunit())
 
     def iterbytes(self):
         self.InternalizeL()
@@ -389,52 +422,81 @@ class E32HuffmanStream(Decompressor):
                 else:
                     d = code + 1
                     yield from self.remember(self.repeat(self._rptlength, d))
-                    print("endrepeat")
                     self._decoding = self._lldecoding
 
     def __iter__(self):
         return self.iterbytes()
 
 
+def assembly(section, binary, relocs):
+    yield from f'''
+\t.section .{section}
+\t.globl {section}start
+{section}start:
+'''.splitlines()
+
+    for i in range(0, len(binary), 4):
+        xtra = relocs.get(i, '')
+        word, = struct.unpack('<i', binary[i:i + 4])
+        yield f'''\t.4byte {hex(word)}{xtra}'''
+
+
+def getrelocs(rel):
+    relocs = {}
+    for section in rel.iRelockBlock:
+        for rel in section.iEntry:
+            if rel.iType == E32RelocType.none:
+                pass
+            elif rel.iType == E32RelocType.code:
+                relocs[section.iPageOffset + rel.iOffset >> 2] = ' + textmv'
+            elif rel.iType == E32RelocType.data:
+                relocs[section.iPageOffset + rel.iOffset >> 2] = ' + datamv'
+            else:
+                raise NotImplementedError(rel)
+
+    return relocs
+
+
 def objcopy(fp, header, target_dir):
-    fp.seek(header.iCodeOffset)
+    if header.iCompressionType != TCompression.KUidCompressionDeflate:
+        raise NotImplementedError("Only KUidCompressionDeflate supported")
+    fp.seek(0)
+    headerbytes = fp.read(header.iCodeOffset)
+
     h = E32HuffmanStream()
     h.feed(fp.read())
-    with open(os.path.join(target_dir, 'code.bin'), 'wb') as codefp:
-        i = 0
-        for b in h:
-            print(hex(b))
-            codefp.write(bytearray([b]))
-            if i == 222:
-                break
-            i += 1
+    inflated = io.BytesIO()
+    inflated.write(headerbytes)
+    inflated.write(bytearray(h))
 
-        # remaining data follows
+    inflated.seek(header.iCodeOffset)
+    code = inflated.read(header.iCodeSize)
 
-    #print(hex(fp.tell()))
-    #fp.seek(header.iDataOffset)
-    #with open(os.path.join(target_dir, 'data.bin'), 'wb') as datafp:
-    #    if header.iDataSize:
-    #        for b in h:
-    #            print(hex(b))
-    #            datafp.write(bytearray([b]))
+    # remaining data follows
+    inflated.seek(header.iDataOffset)
+    data = inflated.read(header.iDataSize)
 
+    lines = f'''
+\t.arch {header.iCpuIdentifier.toAsMachine()}
+\t.globl _start
+\t_start = textstart + {header.iEntryPoint:#x}
+'''.splitlines()
+
+    inflated.seek(header.iCodeRelocOffset)
+    coderel = getrelocs(E32RelocSection(inflated))
+    lines.extend(assembly('text', code, coderel))
+
+    inflated.seek(header.iDataRelocOffset)
+    if header.iDataSize:
+        datarel = getrelocs(E32RelocSection(inflated))
+    else:
+        datarel = {}
+    lines.extend(assembly('data', data, datarel))
+
+    lines.append('')
     relo = os.path.join(target_dir, 'rel.o')
     Popen(['arm-none-eabi-as', '-o', relo], stdin=PIPE,
-          universal_newlines=True).communicate(f'''
-    .arch {header.iCpuIdentifier.toAsMachine()}
-    .section .text
-    .globl _start
-    .globl textstart
-textstart:
-    _start = . + {header.iEntryPoint:#x}
-    .incbin "{target_dir}/code-hwsrv.bin"
-
-    .section .data
-    .globl datastart
-datastart:
-    .incbin "{target_dir}/data.bin"
-    ''')
+          universal_newlines=True).communicate('\n'.join(lines))
     Popen(['arm-none-eabi-ld', '-o', os.path.join(target_dir, 'obj.exe'), relo,
            f'--section-start=.text={header.iCodeBase:#x}',
            f'--section-start=.data={header.iDataBase:#x}',

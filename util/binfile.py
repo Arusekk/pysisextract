@@ -1,22 +1,24 @@
 
 import os
 import zlib
-import time
 from enum import Enum, EnumMeta
 from io import BytesIO
 from struct import Struct
 
+
 def TellFile(fp):
     return fp
+
 
 class Unknown(float):
     def __repr__(self):
         return "UNKNOWN"
+
     def __add__(self, o):
         return self
     __radd__ = __add__
-
 UNKNOWN = Unknown('inf')
+
 
 class Attribute:
     @staticmethod
@@ -31,6 +33,7 @@ class Attribute:
     def parsedhook(key):
         return lambda self: None
 
+
 class StructurePayloadLength(Attribute):
     @staticmethod
     def mkvalidator(key):
@@ -39,8 +42,8 @@ class StructurePayloadLength(Attribute):
             actual = self._fin - self._actual_roffsets[key]
             padsize = -actual % self.ALIGNMENT
             if value < actual or value > actual + padsize:
-                raise ParseError(f"{type(self).__name__} at offset {self._at}: "
-                                 f"payload was to be {value} bytes long, "
+                raise ParseError(f"{type(self).__name__} at offset {self._at}:"
+                                 f" payload was to be {value} bytes long,"
                                  f" but {actual} bytes were parsed.")
         return ret
 
@@ -52,6 +55,41 @@ class StructurePayloadLength(Attribute):
             #print(f"Fixed maxfin to {self._maxfin=}")
         return ret
 
+
+class StructureTotalLength(Attribute):
+    @staticmethod
+    def mkvalidator(key):
+        def ret(self):
+            value = getattr(self, key)
+            actual = self._fin - next(iter(self._actual_offsets.values()))
+            padsize = -actual % self.ALIGNMENT
+            if value < actual or value > actual + padsize:
+                raise ParseError(f"{type(self).__name__} at offset {self._at}:"
+                                 f" structure was to be {value} bytes long,"
+                                 f" but {actual} bytes were parsed.")
+        return ret
+
+    @staticmethod
+    def parsedhook(key):
+        def ret(self):
+            value = getattr(self, key)
+            self._maxfin = next(iter(self._actual_offsets.values())) + value
+            #print(f"Fixed maxfin to {self._maxfin=}")
+        return ret
+
+
+class LengthIn(Attribute):
+    def __init__(self, field):
+        self._field = field
+
+    def preparsehook(self, key):
+        def ret(self2):
+            value = getattr(self2, self._field)
+            value = self2._actual_offsets[key] + value
+            return {'_maxfin2': value}
+        return ret
+
+
 class CountIn(Attribute):
     def __init__(self, field):
         self._field = field
@@ -62,6 +100,7 @@ class CountIn(Attribute):
             return {'_maxcount': value}
         return ret
 
+
 class CanBeLast(Attribute):
     @staticmethod
     def parsedhook(key):
@@ -69,6 +108,7 @@ class CanBeLast(Attribute):
             if self._actual_roffsets[key] == self._maxfin:
                 return True
         return ret
+
 
 class SkipNextIfByte(Attribute):
     def __init__(self, nextkey, byte):
@@ -87,6 +127,7 @@ class StructureAnnotations(dict):
     def __init__(self, pardict):
         self.pardict = pardict
         super().__init__()
+
     def __setitem__(self, key, val):
         if key in self:
             self.pardict['_validators'].append(val.mkvalidator(key))
@@ -100,11 +141,14 @@ class StructureAnnotations(dict):
             self.pardict['SIZE'] = UNKNOWN
         return super().__setitem__(key, val)
 
+
 class ParseError(ValueError):
     pass
 
+
 class TemplateNeeded(ValueError):
     pass
+
 
 class StructureMeta(type):
     @classmethod
@@ -127,11 +171,15 @@ class StructureMeta(type):
                 d['_offsets'].update(base._offsets)
             if hasattr(base, '_hooks'):
                 d['_hooks'].update(base._hooks)
+            #if hasattr(base, '_struct'):
+            #    d['_struct'] = base._struct
+            #if hasattr(base, '_rdstruct'):
+            #    d['_rdstruct'] = base._rdstruct
         return d
 
     @classmethod
     def from_ctypes(meta, ctypes_struct):
-        pass
+        raise NotImplementedError
 
     @classmethod
     def __new__(meta, metacl, name, bases, dic):
@@ -147,7 +195,8 @@ class StructureMeta(type):
         if subclassfield:
             try:
                 setattr(cls, subclassfield,
-                        getattr(cls.__base__.__annotations__[subclassfield], cls.__name__))
+                        getattr(cls.__base__.__annotations__[subclassfield],
+                                cls.__name__))
             except AttributeError:
                 pass
         return cls
@@ -197,6 +246,7 @@ class StructureMeta(type):
         if not isinstance(args, tuple):
             args = args,
         return cls._instantiate(dict(zip(cls._template, args)))
+
 
 class Structure(metaclass=StructureMeta):
     _template = ()
@@ -301,9 +351,6 @@ class Structure(metaclass=StructureMeta):
             except ValueError:
                 raise ParseError(f"{subcl.__name__} at offset {offset}: "
                                  f"invalid {tp.__name__} {field}")
-            except TypeError:
-                #print(f"{tp=}")
-                raise
             self._actual_roffsets[field] = parsefile.tell()
             try:
                 defval = getattr(cls, field)
@@ -354,8 +401,10 @@ class Structure(metaclass=StructureMeta):
     def __repr__(self):
         *f, = self._fields()
         sep = ',\n' if len(f) > 4 else ', '
-        fieldrep = sep.join(f"{key}={value!r}" for key, value in f).replace('\n', '\n    ')
+        fieldrep = sep.join(f"{key}={value!r}"
+                            for key, value in f).replace('\n', '\n    ')
         return f"""<{self.__class__.__name__}:  {fieldrep}>"""
+
 
 def get_base_type(tp, metaclass=StructureMeta):
     class BaseType(tp, Structure, metaclass=metaclass):
@@ -368,18 +417,20 @@ def get_base_type(tp, metaclass=StructureMeta):
             self = tp.__new__(subcl, cls._parse(parsefile))
             print(f"Parsed: {self!r}")
             return self
+
         @classmethod
         def _parse(cls, parsefile):
             val, = cls._readstruct(parsefile)
             return val
+
         def __repr__(self):
             return f"<{type(self).__name__}: {super().__repr__()}>"
     return BaseType
 
+
 class hexint(int):
     def __repr__(self):
         return hex(self)
-
 BaseType = get_base_type(hexint)
 
 Int32 = StructureMeta.from_struct('i', name='Int32', bases=BaseType)
@@ -388,10 +439,16 @@ Int8 = StructureMeta.from_struct('b', name='Int8', bases=BaseType)
 UInt64 = StructureMeta.from_struct('Q', name='UInt64', bases=BaseType)
 UInt32 = StructureMeta.from_struct('I', name='UInt32', bases=BaseType)
 UInt16 = StructureMeta.from_struct('H', name='UInt16', bases=BaseType)
-UInt8 = StructureMeta.from_struct('B', name='Uint8', bases=BaseType)
+UInt8 = StructureMeta.from_struct('B', name='UInt8', bases=BaseType)
+
+
+class HexintEnum(hexint, Enum):
+    pass
+
 
 class EnumBaseTypeMeta(StructureMeta, EnumMeta):
     pass
+
 
 def BuildEnum(ft, cls):
     return EnumBaseTypeMeta.from_struct(
@@ -399,11 +456,13 @@ def BuildEnum(ft, cls):
         name=ft.__name__ + cls.__name__,
         bases=get_base_type(cls, metaclass=EnumBaseTypeMeta))
 
+
 class EfficientUInt63(UInt32):
     @property
     def _struct(self):
         return Struct('I' if self < 0x80000000 else 'Q')
     _rdstruct = Struct('i')
+
 
 class ZlibReader:
     def __init__(self, fp):
@@ -431,23 +490,22 @@ class ZlibReader:
         if len(ret) < n:
             while len(ret) < n and not self._obj.eof:
                 rd = self._fp.read(1)
-                #print(f"{rd=}")
                 if not rd:
                     ret += self._obj.flush()
                     break
                 ret += self._obj.decompress(rd)
-                #print(f"{ret=}")
             self._readbuf = BytesIO(ret)
             ret = self._readbuf.read(n)
         self._off += len(ret)
-        #print(f'read({n}): {ret!r} ({self._obj=}, {self._obj.eof=})')
         return ret
 
     def close(self):
         self.read(1)
 
+
 class Zlib(Structure):
     _template = '_tp',
+
     @classmethod
     def __new__(cls, subcl, parseobj, _init_common=None):
         if cls._template:
@@ -458,14 +516,19 @@ class Zlib(Structure):
         zreader.close()
         return ret
 
+
 class Array(list, Structure):
     _template = '_tp',
+
     @classmethod
-    def __new__(cls, subcl, parseobj, _init_common=None, _maxcount=0x80000000):
+    def __new__(cls, subcl, parseobj, _init_common=None, _maxcount=0x80000000,
+                _maxfin2=None):
         if cls._template:
             raise TemplateNeeded(subcl.__name__)
         self = super().__new__(subcl)
         parsefile, self._maxfin = cls._parsefile(parseobj)
+        if _maxfin2 is not None:
+            self._maxfin = _maxfin2
         self._init_common = _init_common
         self._maxcount = _maxcount
         return self._parse(parsefile)
@@ -482,14 +545,25 @@ class Array(list, Structure):
             else:
                 obj = self._tp(fileobj)
             self.append(obj)
+            print(f"element #{i}/{self._maxcount}")
         return self
 
-class UTF16String(Structure): # str
+    def __repr__(self):
+        if len(self) < 4:
+            return super().__repr__()
+        sep = ',\n'
+        fieldrep = sep.join(repr(value)
+                            for value in self).replace('\n', '\n    ')
+        return f"[{fieldrep}]"
+
+
+class UTF16String(Structure):  # str
     def _parse(self, fileobj):
         print(f"{self._maxfin=}, {fileobj.tell()=}")
         rd = fileobj.read(self._maxfin - fileobj.tell())
         return rd.decode('UTF-16')
 
-class UnknownPayload(Structure): # bytes
+
+class UnknownPayload(Structure):  # bytes
     def _parse(self, fileobj):
         return fileobj.read(self._maxfin - fileobj.tell())
