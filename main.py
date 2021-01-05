@@ -11,6 +11,7 @@ headers = [
 
 par = ArgumentParser()
 par.add_argument('-f', '--format', help="Use this format and do not guess")
+par.add_argument('-p', '--parse-only', help="Only parse, do not extract", action='store_true')
 par.add_argument('ifile', type=FileType('rb'))
 par.add_argument('target_dir')
 arg = par.parse_args()
@@ -27,5 +28,6 @@ with arg.ifile as fp:
             fp.seek(0)
             continue
         print(hdr)
-        ff = payloadfunc(fp, hdr, arg.target_dir)
+        if not arg.parse_only:
+            ff = payloadfunc(fp, hdr, arg.target_dir)
         break

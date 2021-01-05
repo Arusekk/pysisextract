@@ -7,6 +7,7 @@ import struct
 import time
 from enum import IntEnum
 from subprocess import Popen, PIPE
+from e32def import deffiles
 
 from util.binfile import (
     Structure,
@@ -457,21 +458,23 @@ def assembly(section, binary, relocs):
 '''.splitlines()
 
     for i in range(0, len(binary), 4):
-        xtra = relocs.get(i, '')
+        reloc = relocs.get(i, hex)
         word, = struct.unpack('<i', binary[i:i + 4])
-        yield f'''\t.4byte {hex(word)}{xtra}'''
+        yield f'''\t.4byte {reloc(word)}'''
 
 
 def getrelocs(rel):
     relocs = {}
     for section in rel.iRelockBlock:
         for rel in section.iEntry:
+            off = section.iPageOffset + rel.iOffset >> 2
+
             if rel.iType == E32RelocType.none:
                 pass
             elif rel.iType == E32RelocType.code:
-                relocs[section.iPageOffset + rel.iOffset >> 2] = ' + textmv'
+                relocs[off] = '{:#x} + textmv'.format
             elif rel.iType == E32RelocType.data:
-                relocs[section.iPageOffset + rel.iOffset >> 2] = ' + datamv'
+                relocs[off] = '{:#x} + datamv'.format
             else:
                 raise NotImplementedError(rel)
 
@@ -489,11 +492,39 @@ def mangle(name):
 
 
 def getimports(imps):
+    def importer(key, fallback):
+        def reloc(val):
+            addend, idx = divmod(val, 0x1000)
+            try:
+                return f'{deffiles[key][idx]} + {addend}'
+            except IndexError:
+                return fallback(val)
+        return reloc
+    # special case: obex.dll definitions are in irobex.def
+    namemap = {
+        'obex': 'irobex',
+    }
+
     imports = {}
     for imp in imps.iImportBlock:
         print(f"{len(imp.iImport)} imports from DLL: {imp.dllName!r}")
+        basename = imp.dllName.split('.')[0].split('{')[0].lower()
+        fallback = f'%s + {mangle(imp.dllName)}'.__mod__
+        if basename in deffiles:
+            thing = importer(basename, fallback)
+        elif basename + 'u' in deffiles:
+            thing = importer(basename + 'u', fallback)
+        else:
+            basename = namemap.get(basename, basename)
+            for lib in deffiles:
+                if lib.startswith(basename):
+                    thing = importer(lib, fallback)
+                    break
+            else:
+                print(f"DLL {imp.dllName} not found at all!")
+                thing = fallback
         for i in imp.iImport:
-            imports[i] = f' + {mangle(imp.dllName)}'
+            imports[i] = thing
     return imports
 
 
@@ -507,7 +538,11 @@ def objcopy(fp, header, target_dir):
     h.feed(fp.read())
     inflated = io.BytesIO()
     inflated.write(headerbytes)
-    inflated.write(bytearray(h))
+    inflated.write(bytes(h))
+
+    inflated.seek(0)
+    with open(os.path.join(target_dir, 'uncompressed.exe'), 'wb') as dump:
+        dump.write(inflated.read())
 
     inflated.seek(header.iCodeOffset)
     code = inflated.read(header.iCodeSize)
@@ -527,8 +562,11 @@ def objcopy(fp, header, target_dir):
 
     lines = f'''
 \t.arch {header.iCpuIdentifier.toAsMachine()}
-\t.globl _start
-\t_start = textstart + {header.iEntryPoint:#x}
+\t.globl _E32Startup
+\t.arm
+\t.syntax unified
+\t.type _E32Startup,%function
+\t_E32Startup = textstart + {header.iEntryPoint:#x}
 \ttextmv = textstart - {header.iCodeBase:#x}
 \tdatamv = datastart - {header.iDataBase:#x}
 '''.splitlines()
@@ -549,7 +587,11 @@ def objcopy(fp, header, target_dir):
     relo = os.path.join(target_dir, 'rel.o')
     Popen(['arm-none-eabi-as', '-o', relo], stdin=PIPE,
           universal_newlines=True).communicate('\n'.join(lines))
-    Popen(['arm-none-eabi-ld', '-o', os.path.join(target_dir, 'obj.elf'), relo,
+    Popen(['arm-none-eabi-ld',
+           '-o', os.path.join(target_dir, 'obj.elf'),
+           relo,
+           f'--entry=_E32Startup',
+           f'-Bdynamic',
            f'--section-start=.text={header.iCodeBase:#x}',
            f'--section-start=.data={header.iDataBase:#x}',
     ])
