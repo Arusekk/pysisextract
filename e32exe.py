@@ -25,6 +25,7 @@ from util.binfile import (
     Array,
     CountIn,
     LengthIn,
+    StructurePayloadLength,
     StructureTotalLength,
 )
 from util.bitstream import Decompressor
@@ -198,6 +199,26 @@ class E32ImageHeader(Structure):
     iExportDescType : TUint8  # Type of description of holes in export table
     iExportDesc : Array[TUint8]		# Description of holes in export table, size given by iExportDescSize..
     iExportDesc : CountIn('iExportDescSize')
+
+
+class E32ImportBlock(Structure):
+    iOffsetOfDllName: TUint32		# Offset from start of import section for a NUL terminated executable (DLL or EXE) name.
+    iNumberOfImports: TInt		# Number of imports from this executable.
+    iImport: Array[TUint]		# For ELF-derived executes: list of code section offsets. For PE, list of imported ordinals. Omitted in PE2 import format
+    iImport: CountIn('iNumberOfImports')
+
+
+class E32ImportSection(Structure):
+    iSize: TInt		# Size of this section excluding 'this' structure
+    # iSize: StructurePayloadLength  # actually this counts garbage as well
+    iImportBlock: Array[E32ImportBlock]
+    iImportBlock: CountIn('refTableCount')
+
+    @classmethod
+    def __new__(cls, *a, refTableCount=None, **kw):
+        def init_common(self):
+            self.refTableCount = refTableCount
+        return super().__new__(*a, init_common=init_common, **kw)
 
 
 class E32RelocType(IntEnum):  # made up names
@@ -457,6 +478,25 @@ def getrelocs(rel):
     return relocs
 
 
+def mangle(name):
+    s = []
+    for x in name:
+        if '0' <= x <= '9' or 'a' <= x.lower() <= 'z':
+            s.append(x)
+        else:
+            s.append(f'_{ord(x):02x}_')
+    return ''.join(s)
+
+
+def getimports(imps):
+    imports = {}
+    for imp in imps.iImportBlock:
+        print(f"{len(imp.iImport)} imports from DLL: {imp.dllName!r}")
+        for i in imp.iImport:
+            imports[i] = f' + {mangle(imp.dllName)}'
+    return imports
+
+
 def objcopy(fp, header, target_dir):
     if header.iCompressionType != TCompression.KUidCompressionDeflate:
         raise NotImplementedError("Only KUidCompressionDeflate supported")
@@ -476,14 +516,26 @@ def objcopy(fp, header, target_dir):
     inflated.seek(header.iDataOffset)
     data = inflated.read(header.iDataSize)
 
+    inflated.seek(header.iImportOffset)
+    imports = E32ImportSection(inflated,
+                               refTableCount=header.iDllRefTableCount)
+
+    for imp in imports.iImportBlock:
+        inflated.seek(header.iImportOffset + imp.iOffsetOfDllName)
+        dllName = inflated.read(0x51)  # 0x50 == KMaxKernelName
+        imp.dllName = dllName.split(b'\0')[0].decode('ascii')
+
     lines = f'''
 \t.arch {header.iCpuIdentifier.toAsMachine()}
 \t.globl _start
 \t_start = textstart + {header.iEntryPoint:#x}
+\ttextmv = textstart - {header.iCodeBase:#x}
+\tdatamv = datastart - {header.iDataBase:#x}
 '''.splitlines()
 
     inflated.seek(header.iCodeRelocOffset)
     coderel = getrelocs(E32RelocSection(inflated))
+    coderel.update(getimports(imports))
     lines.extend(assembly('text', code, coderel))
 
     inflated.seek(header.iDataRelocOffset)
@@ -497,7 +549,7 @@ def objcopy(fp, header, target_dir):
     relo = os.path.join(target_dir, 'rel.o')
     Popen(['arm-none-eabi-as', '-o', relo], stdin=PIPE,
           universal_newlines=True).communicate('\n'.join(lines))
-    Popen(['arm-none-eabi-ld', '-o', os.path.join(target_dir, 'obj.exe'), relo,
+    Popen(['arm-none-eabi-ld', '-o', os.path.join(target_dir, 'obj.elf'), relo,
            f'--section-start=.text={header.iCodeBase:#x}',
            f'--section-start=.data={header.iDataBase:#x}',
     ])
