@@ -6,7 +6,7 @@ import os.path
 import struct
 import time
 from enum import IntEnum
-from subprocess import Popen, PIPE
+from subprocess import check_call, Popen, PIPE
 from e32def import deffiles
 
 from util.binfile import (
@@ -26,7 +26,6 @@ from util.binfile import (
     Array,
     CountIn,
     LengthIn,
-    StructurePayloadLength,
     StructureTotalLength,
 )
 from util.bitstream import Decompressor
@@ -223,10 +222,10 @@ class E32ImportSection(Structure):
 
 
 class E32RelocType(IntEnum):  # made up names
-    none = 0
-    code = 1
-    data = 2
-    guess = 3
+    KReservedRelocType = 0x0000
+    KTextRelocType = 0x1000
+    KDataRelocType = 0x2000
+    KInferredRelocType = 0x3000
 
 
 class E32RelocEntry(TUint16):  # made up name
@@ -236,7 +235,7 @@ class E32RelocEntry(TUint16):  # made up name
 
     @property
     def iType(self):
-        return E32RelocType(self >> 12)
+        return E32RelocType(self & 0xf000)
 
     def __repr__(self):
         return (f"<{type(self).__name__}: "
@@ -467,13 +466,13 @@ def getrelocs(rel):
     relocs = {}
     for section in rel.iRelockBlock:
         for rel in section.iEntry:
-            off = section.iPageOffset + rel.iOffset >> 2
+            off = section.iPageOffset + rel.iOffset
 
-            if rel.iType == E32RelocType.none:
-                pass
-            elif rel.iType == E32RelocType.code:
+            if rel == 0:
+                continue
+            if rel.iType == E32RelocType.KTextRelocType:
                 relocs[off] = '{:#x} + textmv'.format
-            elif rel.iType == E32RelocType.data:
+            elif rel.iType == E32RelocType.KDataRelocType:
                 relocs[off] = '{:#x} + datamv'.format
             else:
                 raise NotImplementedError(rel)
@@ -587,11 +586,14 @@ def objcopy(fp, header, target_dir):
     relo = os.path.join(target_dir, 'rel.o')
     Popen(['arm-none-eabi-as', '-o', relo], stdin=PIPE,
           universal_newlines=True).communicate('\n'.join(lines))
-    Popen(['arm-none-eabi-ld',
+    check_call(['arm-none-eabi-ld',
            '-o', os.path.join(target_dir, 'obj.elf'),
            relo,
            f'--entry=_E32Startup',
-           f'-Bdynamic',
+           f'-shared',
+           f'-z', f'max-page-size=0x1000',
+           f'-z', f'separate-code',
            f'--section-start=.text={header.iCodeBase:#x}',
            f'--section-start=.data={header.iDataBase:#x}',
+           f'--section-start=.gnu.hash={header.iDataBase-0x10000:#x}',
     ])
